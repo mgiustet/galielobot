@@ -265,6 +265,16 @@ def rank_callback(update: Update, context: CallbackContext):
     query.answer()
 
 
+def search_handler(update: Update, context: CallbackContext):
+    query = update.inline_query.query
+    if query == "":
+        return
+    plrs = sort_names(total=True)
+    titles = ["Inactive", "Active"]
+    res = [[InlineQueryResultArticle(id=s["ID"], title=titles[1-i], input_message_content=InputTextMessageContent(s["Nome"])) for s in plrs[1-i] if query.lower() in s["Nome"].lower()] for i in range(2)]
+    
+    update.inline_query.answer(res[0] + res[1])
+
 def error_handler(update: Update, context: CallbackContext):
     #logger.warning('Update "%s" caused error "%s"', update, context.error)
     logger.exception(context.error)
@@ -272,7 +282,7 @@ def error_handler(update: Update, context: CallbackContext):
                              text=f"Error:\n\n`{context.error}`",
                              parse_mode=telegram.ParseMode.MARKDOWN_V2)
         
-updater = Updater(token='5255537406:AAEHfU30jmjDtY2QXyYR8UQADHKSpIsa324', use_context=True)
+updater = Updater(token=TOKEN, use_context=True)
 dispatcher = updater.dispatcher
 
 dispatcher.add_handler(CommandHandler('start', start_command))
@@ -280,6 +290,7 @@ dispatcher.add_handler(CommandHandler('rank', rank_command))
 dispatcher.add_handler(CommandHandler('delete', delete_command))
 dispatcher.add_handler(CommandHandler('stats', stats_command))
 dispatcher.add_handler(CallbackQueryHandler(rank_callback))
+dispatcher.add_handler(InlineQueryHandler(search_handler))
 dispatcher.add_error_handler(error_handler)
 
 if ONLINE:
