@@ -3,37 +3,118 @@ import logging
 import os
 import telegram
 from telegram import *
-from telegram.ext import Updater, CallbackContext, CommandHandler, CallbackQueryHandler
+from telegram.ext import Updater, CallbackContext, CommandHandler, CallbackQueryHandler, InlineQueryHandler
 
-#Switch between local and online behaviour
+#switch between local and online behaviour
 ONLINE = True
+if os.path.expanduser("~").startswith("/home"):
+    ONLINE = False
 
-TOKEN = open("TOKEN.txt", "r").read()
+f = open("TOKEN.txt", "r")
+TOKEN = f.readline()[:-1]   #leave out the newline character
+f.close()
+
 #Heroku-only variables
-PORT = int(os.environ.get("PORT")) if ONLINE else 0
+PORT = 0
+if ONLINE:
+    PORT = int(os.environ.get("PORT"))
 APP_PATH = "https://galielobot.herokuapp.com/"
 #API variables
 BASE_URL = "http://galielo.altervista.org/api/"
 STAT_URL = "http://galielo.altervista.org/elo/player_stats.php?id="
+
+#general datas of the bot
 strings = ["Select the winning team's attacker",
            "Select the winning team's defender",
            "Select the losing team's attacker",
            "Select the losing team's defender"]
-other_str = ["Show inactive players >>", "<< Show active players", "<-- Back", "Search —○"]
-plr_names_db = []
-#to be used only for name searches. It is updated once a user starts a new search
+other_str = ["Show inactive players >>",
+             "<< Show active players",
+             "<-- Back",
+             "Search —○"]
 btns_per_line = 2
 #max number of buttons that can be visualized by the Telegram client
 #TODO: check that there are no more than that in a message...
 #MAX_NUM_BUTTONS = 100
 
+
+
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-#TODO:
-#-search for players' names
+
+
+def show_menu(params, category, mess_id):
+    #return the text and keyboard markup associated with the specified parameters and category to be shown (0/1 for active/inactive); mess_id is the id of the message to be sent
+    #in case all parameters are given, ranks the match
+
+    if len(params) < 4:
+        #choose next player
+
+        s = ",".join(params) if len(params) > 0 else ""
+        s_formatted = s+"," if len(s) > 0 else ""
+        #list of chosen players, to be ruled out from future choices
+        rule_out = params[:max(4, len(params))] if len(params) > 0 else []
+        #ASCII art representing the present match
+        str_formatted = plr_format(rule_out)+"\n\n"
+        #list of valid players
+        plr_list = sort_names(rule_out)[:]
+
+        step = len(params)                                  #0 -> winning attack, 1 -> winning defense, 2 -> losing attack, 3 -> losing defense
+        def_index = step % 2                                #0 -> attack, 1 -> defense
+
+        #callback data for the active/inactive button
+        callback_str = f"sh_{'ina' if category else 'act'}_{'def' if def_index else 'atk'}_{str(step)}"
+
+        #list of buttons for the players
+        btns = [InlineKeyboardButton(text=p["Nome"],
+                                     callback_data=s_formatted+str(p["ID"])+"_"+str(step)) for p in plr_list[2*def_index + (1-category)]]
+        #arrange the buttons in rows
+        keyboard = [btns[i : i+btns_per_line] for i in range(0, len(btns), btns_per_line)]
+        #search offset string
+        search_offset = "rank "+str(mess_id)+(","+s if len(s) > 0 else "")+" "
+        #extra buttons
+        back_btn = InlineKeyboardButton(text=other_str[2],
+                                        callback_data=s+"_back_"+str(step))
+        other_cat = InlineKeyboardButton(text=other_str[category],
+                                         callback_data=s+callback_str)
+        search_button = InlineKeyboardButton(text=other_str[3],
+                                             switch_inline_query_current_chat=search_offset)
+        #compose the upper part of the keyboard --- the search button is at the bottom
+        other = [[back_btn], [other_cat]] if step > 0 else [[other_cat]]
+        return [str_formatted+strings[step],
+                InlineKeyboardMarkup(other + keyboard + [[search_button]])]
+    elif len(params) == 4:
+        #choose the score
+        s = ",".join(params)
+        back_btn = InlineKeyboardButton(text=other_str[2],
+                                        callback_data=s+"_back_4")
+        points_keyboard = [[back_btn]] + [[InlineKeyboardButton(text="10:"+str(i),
+                                                                callback_data=s+","+str(i)+"_sc")] for i in range(10)]
+        return [plr_format(params[:4])+"\n\n"+"What was the score?",
+                InlineKeyboardMarkup(points_keyboard)]
+
+    elif len(params) == 5:
+        #rank the match and show results
+
+        #add the game to the database!
+        res = add_match(int(params[0]), int(params[1]), int(params[2]), int(params[3]), int(params[4]))
+        if res["success"]:
+            #send confirm message
+            var_points = [str(res["VarA1"]), str(res["VarD1"]), str(res["VarA2"]), str(res["VarD2"])]
+            mex_text = "Match added:\n\n" + plr_format(params + var_points)
+            if res["ccup"]:
+                mex_text = mex_text + "\n\nThe champion cup has been updated!"
+            return [mex_text, None]
+        else:
+            #send error message
+            return [f"Match not added:\n\n`{str(res['error_message'])}`", None]
+    else:
+        #show some error
+        return ["Error, too many paramaters.", None]
 
 def sort_names(rule_out=[], total=False):
+    #return two or four (depending on total) lists of players ordered by reverse alphabetical order
     data = players()
     output = data[:]
     for i in range(len(data)):
@@ -68,25 +149,56 @@ def sort_names(rule_out=[], total=False):
                     def_act.append(output[i])
         return [atk_inact, atk_act, def_inact, def_act]
 
+def check_query(q):
+    #check that the string q is a representation of a list of numbers with 1 <= len <= 4
+    #the first parameter should be the ID of a message and the others IDs of players
+    #TODO: check that the latter effectively holds
+    dummy = q.replace(",", "")
+    if dummy.isnumeric():
+        #check that the data are correct
+        dummy = q.split(",")
+        if len(dummy) >= 1 and len(dummy) <= 5:
+            # mess_id = dummy[0]
+            # data = dummy[1:]
+            # try:
+            #
+            # except:
+            #     return False
+            return True
+    return False
+
+
 def players():
+    #return a list of all the players
     res = requests.get(BASE_URL + "player.php")
     return res.json()
 
 def plr_stats(plr_id):
+    #return a list of basic stats of the player having plr_id as ID
     res = requests.get(BASE_URL + "player.php?id=" + str(plr_id))
     return res.json()
 
 def matches():
+    #return a list of all visible matches in the database
     res = requests.get(BASE_URL + "match.php")
     return res.json()
 
 def plr_names(plr_ids):
+    #return the names of the players having plr_id as ID
     plrs = players()
     return [[p["Nome"] for p in plrs if str(p["ID"]) == str(var)][0] for var in plr_ids]
 
 def plr_format(datas):
+    #return a human-readable string for the match represented by datas --- the format expected is:
+    #
+    #   0-3: IDs of the players (winning attacker, winning defender, losing attacker, losing defender)
+    #   4: score of the losing telegram
+    #   5-8: point variation of the players involved after the match
+    #
+    #any number of parameters can be provided, the empty spots will be filled by "?"s
     names = []
     if len(datas) >= 9:
+        #if point variations have been provided, display them next to the names
         names = plr_names(datas[:4])
         names = [names[i] + f" ({str(datas[5+i])})" for i in range(4)]
     else:
@@ -97,11 +209,13 @@ def plr_format(datas):
     return f"`{names[0]:<{l}}\n{names[1]:<{l}}\n{'└ 10-'+str(points)+' ┐':^{l}}\n{names[2]:<{l}}\n{names[3]:<{l}}`"
 
 def add_match(atk_win, def_win, atk_lose, def_lose, points):
+    #add the match specifed by the parameters to the database
     params = {"add":True,"att1":atk_win,"att2":atk_lose,"dif1":def_win,"dif2":def_lose,"pt1":10,"pt2":points}
     res = requests.post(url = BASE_URL+"match.php?", data = params)
     return res.json()
 
 def del_match():
+    #delete last match from the database
     requests.post(url = BASE_URL+"match.php?", data = {"delete":True})
 
 
@@ -112,21 +226,28 @@ def start_command(update: Update, context: CallbackContext):
 
 def rank_command(update: Update, context: CallbackContext):
     #start the ranking process, which is then continued by rank_callback on subsequent clicks
-    plr_list = sort_names()[:]
-    
-    btns = [InlineKeyboardButton(text=p["Nome"], callback_data=str(p["ID"])+"_0") for p in plr_list[1]]
-    keyboard = [btns[i : i+btns_per_line] for i in range(0, len(btns), btns_per_line)]
-    other = InlineKeyboardButton(text=other_str[0], callback_data="sh_ina_atk_0")
+    # plr_list = sort_names()[:]
+    #
+    # btns = [InlineKeyboardButton(text=p["Nome"], callback_data=str(p["ID"])+"_0") for p in plr_list[1]]
+    # keyboard = [btns[i : i+btns_per_line] for i in range(0, len(btns), btns_per_line)]
+    # other_cat = InlineKeyboardButton(text=other_str[0],
+    #                              callback_data="sh_ina_atk_0")
+    # search_button = InlineKeyboardButton(text=other_str[3],
+    #                                      switch_inline_query_current_chat="rank "+str(update.message.message_id)+" ")
+
+    res = show_menu([], 0, update.message.message_id+1)
     context.bot.send_message(chat_id=update.effective_chat.id,
-                             text=plr_format([])+"\n\n"+strings[0],
+                             text=res[0],
                              parse_mode=telegram.ParseMode.MARKDOWN_V2,
-                             reply_markup=InlineKeyboardMarkup([[other]] + keyboard))
+                             reply_markup=res[1])
 
 def delete_command(update: Update, context: CallbackContext):
     last = matches()[-1]
     message_str = plr_format([last["Att1"], last["Dif1"], last["Att2"], last["Dif2"], last["Pt2"]])
-    keyboard = [[InlineKeyboardButton(text="Yes", callback_data=str(last["ID"])+"_del_yes"),
-                 InlineKeyboardButton(text="No", callback_data="del_no")]]
+    keyboard = [[InlineKeyboardButton(text="Yes",
+                                      callback_data=str(last["ID"])+"_del_yes"),
+                 InlineKeyboardButton(text="No",
+                                      callback_data="del_no")]]
     context.bot.send_message(chat_id=update.effective_chat.id,
                              text=message_str+"\n\nAre you sure that you want to delete this match?",
                              parse_mode=telegram.ParseMode.MARKDOWN_V2,
@@ -134,13 +255,30 @@ def delete_command(update: Update, context: CallbackContext):
 
 def stats_command(update: Update, context: CallbackContext):
     plr_list = sort_names(total=True)[:]
-    btns = [InlineKeyboardButton(text=p["Nome"], callback_data=str(p["ID"])+"_stat") for p in plr_list[1]]
+    btns = [InlineKeyboardButton(text=p["Nome"],
+                                 callback_data=str(p["ID"])+"_stat") for p in plr_list[1]]
     keyboard = [btns[i : i+btns_per_line] for i in range(0, len(btns), btns_per_line)]
-    other = InlineKeyboardButton(text=other_str[0], callback_data="sh_ina_stat")
+    other_cat = InlineKeyboardButton(text=other_str[0],
+                                 callback_data="sh_ina_stat")
     context.bot.send_message(chat_id=update.effective_chat.id,
                              text="Choose a player:",
-                             reply_markup=InlineKeyboardMarkup([[other]] + keyboard))
-    
+                             reply_markup=InlineKeyboardMarkup([[other_cat]] + keyboard))
+
+def proc_command(update: Update, context: CallbackContext):
+    #hidden command to process the choice of player with the "Search" function
+    values = update.message.text.split(" ")[1]
+    params = values.split(",")
+    mess_id = int(params[0])
+    res = show_menu(params[1:], 0, mess_id)
+    #delete the last message sent to the bot
+    context.bot.delete_message(update.message.chat.id, update.message.message_id)
+    #edit the message specified by mess_id
+    context.bot.edit_message_text(chat_id=update.message.chat.id,
+                                  message_id=mess_id,
+                                  text=res[0],
+                                  parse_mode=telegram.ParseMode.MARKDOWN_V2,
+                                  reply_markup=res[1])
+
 def rank_callback(update: Update, context: CallbackContext):
     query = update.callback_query
     data = query.data
@@ -165,15 +303,17 @@ def rank_callback(update: Update, context: CallbackContext):
             #user changed category to visualize
             plr_list = sort_names(total=True)[:]
             act_index = 0 if "ina" in data else 1               #0 -> show inactive, 1 -> show active
-            
-            btns = [InlineKeyboardButton(text=p["Nome"], callback_data=str(p["ID"])+"_stat") for p in plr_list[act_index]]
+
+            btns = [InlineKeyboardButton(text=p["Nome"],
+                                         callback_data=str(p["ID"])+"_stat") for p in plr_list[act_index]]
             keyboard = [btns[i : i+btns_per_line] for i in range(0, len(btns), btns_per_line)]
 
             act_index = 1-act_index
-            
-            other = InlineKeyboardButton(text=other_str[act_index], callback_data=f"sh_{'act' if act_index else 'ina'}_stat")
+
+            other_cat = InlineKeyboardButton(text=other_str[act_index],
+                                         callback_data=f"sh_{'act' if act_index else 'ina'}_stat")
             query.edit_message_text(text="Choose a player:",
-                                    reply_markup=InlineKeyboardMarkup([[other]] + keyboard))
+                                    reply_markup=InlineKeyboardMarkup([[other_cat]] + keyboard))
         else:
             #show statistics
             s = data[:-5]
@@ -186,102 +326,83 @@ def rank_callback(update: Update, context: CallbackContext):
         if "sh" in data:
             #user changed category to visualize
             s = data[:-12] if len(data) > 12 else ""
-            s_formatted = s+"," if len(s) > 0 else ""
-            rule_out = data[:-12].split(",") if len(data) > 12 else []
-            str_formatted = plr_format(rule_out)+"\n\n"
-            plr_list = sort_names(rule_out)[:]
-
-            step = int(data[-1])
+            params = data[:-12].split(",") if len(data) > 12 else []
             act_index = 0 if "ina" in data else 1               #0 -> show inactive, 1 -> show active
-            def_index = 0 if "atk" in data else 1               #0 -> attack, 1 -> defense
-            plr_index = 2 * def_index + act_index               #0 -> inactive attack, 1 -> active attack, 2 -> inactive defense, 3 -> active defense
 
-            act_index = 1 - act_index
-            
-            callback_str = f"sh_{'act' if act_index else 'ina'}_{'def' if def_index else 'atk'}_{str(step)}"
-            
-            btns = [InlineKeyboardButton(text=p["Nome"], callback_data=s_formatted+str(p["ID"])+"_"+str(step)) for p in plr_list[plr_index]]
-            keyboard = [btns[i : i+btns_per_line] for i in range(0, len(btns), btns_per_line)]
-            other1 = InlineKeyboardButton(text=other_str[2], callback_data=s+"_back_"+str(step))
-            other2 = InlineKeyboardButton(text=other_str[0], callback_data=s+"sh_ina_"+("def" if def_index else "atk")+"_"+str(step))
-            other = [[other1], [other2]] if step > 0 else [[other2]]
-            query.edit_message_text(text=str_formatted+strings[step],
+            res = show_menu(params, act_index, query.message.message_id)
+
+            query.edit_message_text(text=res[0],
                                     parse_mode=telegram.ParseMode.MARKDOWN_V2,
-                                    reply_markup=InlineKeyboardMarkup(other + keyboard))
+                                    reply_markup=res[1])
         elif "_sc" in data:
             #all datas entered, rank the match
-            datas = data[:-3].split(",")
-            res = add_match(int(datas[0]), int(datas[1]), int(datas[2]), int(datas[3]), int(datas[4])) #add the game to the database!
-            if res["success"]:
-                #send confirm message
-                var_points = [str(res["VarA1"]), str(res["VarD1"]), str(res["VarA2"]), str(res["VarD2"])]
-                mex_text = "Match added:\n\n" + plr_format(datas + var_points)
-                if res["ccup"]:
-                    mex_text = mex_text + "\n\nThe champion cup has been updated!"
-                query.edit_message_text(text=mex_text,
-                                        parse_mode=telegram.ParseMode.MARKDOWN_V2)
-            else:
-                #send error message
-                mex_text = f"Match not added:\n\n`{str(res['error_message'])}`"
-                query.edit_message_text(text=mex_text,
-                                        parse_mode=telegram.ParseMode.MARKDOWN_V2)
+            params = data[:-3].split(",")
+            res = show_menu(params, 0, query.message.message_id)
+            query.edit_message_text(text=res[0],
+                                    parse_mode=telegram.ParseMode.MARKDOWN_V2,
+                                    reply_markup=res[1])
         else:
             #we are in the process of selecting players and score
-            s = ""
-            rule_out = []
-            step = 0
+            params = []
             if "back" in data:
                 #user chose to go back
-                step = int(data[-1]) - 1
-                rule_out = data[:-7].split(",")[:-1]
-                s = ",".join(rule_out)
+                params = data[:-7].split(",")[:-1]
             else:
                 #go on
-                s = data[:-2]
-                rule_out = s.split(",")
-                step = int(data[-1]) + 1
-            
-            s_formatted = s+"," if len (s) > 0 else ""
-            plr_list = sort_names(rule_out)[:]
-            if step == 4:
-                #all players selected, ask the score
-                points_keyboard = [[InlineKeyboardButton(text=other_str[2], callback_data=s+"_back_4")]] + [[InlineKeyboardButton(text="10:"+str(i), callback_data=s+","+str(i)+"_sc")] for i in range(10)]
-                query.edit_message_text(text=plr_format(rule_out)+"\n\n"+"What was the score?",
-                                        parse_mode=telegram.ParseMode.MARKDOWN_V2,
-                                        reply_markup=InlineKeyboardMarkup(points_keyboard))
-            else:
-                #ask the next player
-                def_index = step % 2                            #0 -> attack, 1 -> defense
-#                                                      this is because we always want to show active players at this point -> \_______________
-                btns = [InlineKeyboardButton(text=p["Nome"], callback_data=s_formatted+str(p["ID"])+"_"+str(step)) for p in plr_list[2*def_index + 1]]
-                keyboard = [btns[i : i+btns_per_line] for i in range(0, len(btns), btns_per_line)]
-                other1 = InlineKeyboardButton(text=other_str[2], callback_data=s+"_back_"+str(step))
-                other2 = InlineKeyboardButton(text=other_str[0], callback_data=s+"sh_ina_"+("def" if def_index else "atk")+"_"+str(step))
-                other = [[other1], [other2]] if step > 0 else [[other2]]
-                query.edit_message_text(text=plr_format(rule_out)+"\n\n"+strings[step],
-                                        parse_mode=telegram.ParseMode.MARKDOWN_V2,
-                                        reply_markup=InlineKeyboardMarkup(other + keyboard))
+                params = data[:-2].split(",")
+
+            res = show_menu(params, 0, query.message.message_id)
+
+            query.edit_message_text(text=res[0],
+                                    parse_mode=telegram.ParseMode.MARKDOWN_V2,
+                                    reply_markup=res[1])
     #everything done, answer the query
     query.answer()
 
 
 def search_handler(update: Update, context: CallbackContext):
     query = update.inline_query.query
-    if query == "":
-        return
-    plrs = sort_names(total=True)
-    titles = ["Inactive", "Active"]
-    res = [[InlineQueryResultArticle(id=s["ID"], title=titles[1-i], input_message_content=InputTextMessageContent(s["Nome"])) for s in plrs[1-i] if query.lower() in s["Nome"].lower()] for i in range(2)]
-    
-    update.inline_query.answer(res[0] + res[1])
+
+    show_stats = True    #dummy variable to show stats of a player if the user is outside of the chat with the bot or datas are corrupt
+
+    res = []
+    if update.inline_query.chat_type == telegram.Chat.SENDER:
+        #check if we are ranking a game
+        if "rank " in query:
+            #separate the parts of the query and proceed
+            query_parts = query.split(" ")
+            s = ""
+            if len(query_parts) > 2:
+                #check if the data are correct
+                if check_query(query_parts[1]):
+                    params = query_parts[1][:].split(",")
+                    for p in players():
+                        if query_parts[-1].lower() in p["Nome"].lower() and str(p["ID"]) not in params[1:]:
+                            res.append(InlineQueryResultArticle(id=p["ID"],
+                                                                title=p["Nome"],
+                                                                input_message_content=InputTextMessageContent(message_text="/proc "+query_parts[1]+","+str(p["ID"]))))
+    if show_stats:
+        #show stats if search result is selected
+        for p in players():
+            if query.lower() in p["Nome"].lower():
+                stat = plr_stats(p["ID"])
+                stat_text = (f"`{stat['Nome']}\n\n"
+                            f"Attack:    {stat['PuntiA']}\n"
+                            f"Defense:   {stat['PuntiD']}\n"
+                            f"Average:   {(int(stat['PuntiA']) + int(stat['PuntiD'])) / 2.0:g}`")
+                res.append(InlineQueryResultArticle(id=p["ID"],
+                                                    title=p["Nome"],
+                                                    input_message_content=InputTextMessageContent(message_text=stat_text+f"\n\nFor more info click [here]({STAT_URL+str(p['ID'])})\.",
+                                                                                                  parse_mode=telegram.ParseMode.MARKDOWN_V2)))
+    update.inline_query.answer(res)
 
 def error_handler(update: Update, context: CallbackContext):
     #logger.warning('Update "%s" caused error "%s"', update, context.error)
     logger.exception(context.error)
-    context.bot.send_message(chat_id=update.effective_chat.id,
-                             text=f"Error:\n\n`{context.error}`",
-                             parse_mode=telegram.ParseMode.MARKDOWN_V2)
-        
+    # context.bot.send_message(chat_id=update.effective_chat.id,
+    #                          text=f"Error:\n\n`{context.error}`",
+    #                          parse_mode=telegram.ParseMode.MARKDOWN_V2)
+
 updater = Updater(token=TOKEN, use_context=True)
 dispatcher = updater.dispatcher
 
@@ -289,17 +410,16 @@ dispatcher.add_handler(CommandHandler('start', start_command))
 dispatcher.add_handler(CommandHandler('rank', rank_command))
 dispatcher.add_handler(CommandHandler('delete', delete_command))
 dispatcher.add_handler(CommandHandler('stats', stats_command))
+dispatcher.add_handler(CommandHandler('proc', proc_command))
 dispatcher.add_handler(CallbackQueryHandler(rank_callback))
 dispatcher.add_handler(InlineQueryHandler(search_handler))
 dispatcher.add_error_handler(error_handler)
 
 if ONLINE:
-    #Create and start a webhook, so that the bot can be put to sleep when not in use, if you are running on Heroku
+    #create and start a webhook, so that the bot can be put to sleep when not in use, if you are running on Heroku
     updater.start_webhook(listen="0.0.0.0", port=PORT, url_path=TOKEN, webhook_url=APP_PATH + TOKEN)
     updater.idle()
 else:
-    #Start polling if you are running in local
+    #start polling if you are running in local
     updater.start_polling()
-    
-    
-    
+
