@@ -1,6 +1,9 @@
-import requests
 import logging
 import os
+import requests
+import signal
+import status_observer as so #local module that changes bot's description when it goes down
+import sys
 import telegram
 from telegram import *
 from telegram.ext import Updater, CallbackContext, CommandHandler, CallbackQueryHandler, InlineQueryHandler
@@ -189,10 +192,10 @@ def plr_names(plr_ids):
     return [[p["Nome"] for p in plrs if str(p["ID"]) == str(var)][0] for var in plr_ids]
 
 def plr_format(datas):
-    #return a human-readable string for the match represented by datas --- the format expected is:
+    #return a human-readable string for the match represented by the list datas --- the format expected for datas is:
     #
     #   0-3: IDs of the players (winning attacker, winning defender, losing attacker, losing defender)
-    #   4: score of the losing telegram
+    #   4: score of the losing team
     #   5-8: point variation of the players involved after the match
     #
     #any number of parameters can be provided, the empty spots will be filled by "?"s
@@ -226,14 +229,6 @@ def start_command(update: Update, context: CallbackContext):
 
 def rank_command(update: Update, context: CallbackContext):
     #start the ranking process, which is then continued by rank_callback on subsequent clicks
-    # plr_list = sort_names()[:]
-    #
-    # btns = [InlineKeyboardButton(text=p["Nome"], callback_data=str(p["ID"])+"_0") for p in plr_list[1]]
-    # keyboard = [btns[i : i+btns_per_line] for i in range(0, len(btns), btns_per_line)]
-    # other_cat = InlineKeyboardButton(text=other_str[0],
-    #                              callback_data="sh_ina_atk_0")
-    # search_button = InlineKeyboardButton(text=other_str[3],
-    #                                      switch_inline_query_current_chat="rank "+str(update.message.message_id)+" ")
 
     res = show_menu([], 0, update.message.message_id+1)
     context.bot.send_message(chat_id=update.effective_chat.id,
@@ -263,6 +258,24 @@ def stats_command(update: Update, context: CallbackContext):
     context.bot.send_message(chat_id=update.effective_chat.id,
                              text="Choose a player:",
                              reply_markup=InlineKeyboardMarkup([[other_cat]] + keyboard))
+
+def last5_command(update: Update, context: CallbackContext):
+    #show the last 5 ranked matches
+    matches_list = matches()[-5:]
+    res = "Last 5 matches present in the database:\n\n\n`"
+    matches_strings = []
+    length = 0
+    for m in matches_list:
+        cur_str = str(m["Timestamp"]) + "\n\n" + plr_format([m["Att1"], m["Dif1"], m["Att2"], m["Dif2"], m["Pt2"]]).replace("`", "")
+        matches_strings.append(cur_str)
+        for s in cur_str.split("\n"):
+            length = len(s) if len(s) > length else length
+    for i in range(4):
+        res = res + matches_strings[i] + "\n\n" + "\-"*length + "\n\n"
+    res = res + matches_strings[4] + "`"
+    context.bot.send_message(chat_id=update.effective_chat.id,
+                             text=res,
+                             parse_mode=telegram.ParseMode.MARKDOWN_V2)
 
 def proc_command(update: Update, context: CallbackContext):
     #hidden command to process the choice of player with the "Search" function
@@ -403,6 +416,7 @@ def error_handler(update: Update, context: CallbackContext):
     #                          text=f"Error:\n\n`{context.error}`",
     #                          parse_mode=telegram.ParseMode.MARKDOWN_V2)
 
+
 updater = Updater(token=TOKEN, use_context=True)
 dispatcher = updater.dispatcher
 
@@ -410,6 +424,7 @@ dispatcher.add_handler(CommandHandler('start', start_command))
 dispatcher.add_handler(CommandHandler('rank', rank_command))
 dispatcher.add_handler(CommandHandler('delete', delete_command))
 dispatcher.add_handler(CommandHandler('stats', stats_command))
+dispatcher.add_handler(CommandHandler('last5', last5_command))
 dispatcher.add_handler(CommandHandler('proc', proc_command))
 dispatcher.add_handler(CallbackQueryHandler(rank_callback))
 dispatcher.add_handler(InlineQueryHandler(search_handler))
@@ -418,8 +433,12 @@ dispatcher.add_error_handler(error_handler)
 if ONLINE:
     #create and start a webhook, so that the bot can be put to sleep when not in use, if you are running on Heroku
     updater.start_webhook(listen="0.0.0.0", port=PORT, url_path=TOKEN, webhook_url=APP_PATH + TOKEN)
+    #update the status to "up"
+    so.update_status(True)
     updater.idle()
+    #if we got here, the updater must have been closed
+    #therefore, update the status to "down"
+    so.update_status(False)
 else:
     #start polling if you are running in local
     updater.start_polling()
-
